@@ -1,154 +1,75 @@
-# High-Performance CUDA Matrix Multiplication (GEMM)
+# CUDA Matrix Multiply
 
-[![Language](https://img.shields.io/badge/Language-CUDA%20%7C%20C%2B%2B17-green.svg)](https://developer.nvidia.com/cuda-toolkit)
-[![Build](https://img.shields.io/badge/Build-CMake%203.18%2B-blue.svg)](https://cmake.org/)
-[![Profiling](https://img.shields.io/badge/Profiling-NVIDIA%20Nsight%20Systems-76B900.svg)](https://developer.nvidia.com/nsight-systems)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)](LICENSE)
+A simple C++ and CUDA project that demonstrates how to optimize matrix multiplication ($C = A \times B$) on NVIDIA GPUs step-by-step.
 
-A high-performance CUDA project demonstrating progressive hardware-level optimizations for **General Matrix Multiplication (GEMM: $C = A \times B$)** on NVIDIA GPUs, comparing custom kernels against single-threaded CPU execution and production-grade **NVIDIA cuBLAS**.
+It compares a basic CPU version against three progressively faster CUDA kernels and NVIDIA's official **cuBLAS** library.
 
 ---
 
-## 📌 Overview
+## What's Inside
 
-Matrix multiplication is the computational backbone of deep learning, computer graphics, and scientific computing. Because naive implementations suffer from severe memory bandwidth saturation, achieving peak hardware efficiency requires structuring algorithms around the physical GPU memory hierarchy: **Registers $\to$ Shared Memory (SRAM) $\to$ Global Memory (DRAM)**.
-
-This repository demonstrates step-by-step optimization techniques that bridge the gap between a naive parallel implementation and hardware-saturating performance.
-
----
-
-## 🚀 Optimization Hierarchy
-
-| Kernel | Technique | Hardware Layer | Key Microarchitectural Mechanism |
-| :--- | :--- | :--- | :--- |
-| **0. CPU Baseline** | Triple-nested loop | Host CPU | Sequential single-core execution; baseline for numerical verification. |
-| **1. GPU Naive** | 2D Thread Grid | Global Memory (DRAM) | 1 thread per output element. Severely memory-bound by redundant global memory reads. |
-| **2. GPU Tiled** | Shared Memory ($32 \times 32$) | On-Chip SRAM | Cooperatively loads tiles into shared memory, reducing DRAM access traffic by **$32\times$**. Synchronized via `__syncthreads()`. |
-| **3. GPU Vec-Tiled** | 1D Thread Coarsening ($TM=4$) | Register File | Each thread computes 4 elements, holding intermediate accumulators in registers to elevate arithmetic intensity and instruction-level parallelism (ILP). |
-| **4. cuBLAS** | Industrial GEMM | Tensor Cores & SASS | NVIDIA's highly optimized library using assembly-level instruction scheduling and Tensor Cores. |
+1. **CPU Reference**: Simple 3-loop matrix multiplication on a single CPU core.
+2. **GPU Naive**: Basic CUDA kernel where each thread calculates one output number.
+3. **GPU Tiled (Shared Memory)**: Loads $32 \times 32$ matrix blocks into fast on-chip shared memory to avoid slow memory reads.
+4. **GPU Thread-Coarsened**: Each thread calculates 4 output values at once using local registers for extra speed.
+5. **GPU cuBLAS**: NVIDIA's official hand-tuned library used as the gold standard.
 
 ---
 
-## 📊 Benchmark Results
+## Performance Comparison (1024 x 1024 Matrix)
 
-Benchmarked on **$1024 \times 1024$ single-precision floating-point (FP32)** matrices:
-
-| Implementation | Execution Time (ms) | Speedup vs. CPU | Speedup vs. Naive GPU |
-| :--- | :---: | :---: | :---: |
-| **CPU Reference** | ~1450.00 ms | $1.0\times$ | — |
-| **GPU Naive** | ~3.10 ms | $\sim 460\times$ | $1.0\times$ |
-| **GPU Tiled (Shared Memory)** | ~1.05 ms | $\sim 1380\times$ | **$\sim 3.0\times$** |
-| **GPU Coarsened / Vec-Tiled** | ~0.68 ms | $\sim 2130\times$ | **$\sim 4.6\times$** |
-| **NVIDIA cuBLAS** | ~0.09 ms | $\sim 16000\times$ | **$\sim 34.0\times$** |
-
-> *Note: Actual runtimes vary based on target GPU architecture (e.g., Turing, Ampere, Ada Lovelace, Hopper).*
+| Version | Time (approx.) | How it works |
+| :--- | :--- | :--- |
+| **CPU** | ~1400 ms | Baseline (slowest, single thread) |
+| **GPU Naive** | ~3.1 ms | Fast parallel start, but waits on memory |
+| **GPU Tiled** | ~1.0 ms | **~3x faster** using fast Shared Memory |
+| **GPU Coarsened** | ~0.7 ms | **~4.5x faster** reusing values in Registers |
+| **cuBLAS** | ~0.1 ms | Hardware-level peak speed |
 
 ---
 
-## 🧠 Key Hardware & Architectural Insights
+## How to Build and Run
 
-### 1. Memory Coalescing
-In global memory, memory controllers service memory requests in contiguous 32-byte to 128-byte segments. In the tiled kernel, adjacent threads in a warp (`threadIdx.x`) read contiguous addresses (`A[row * K + a_col]`), ensuring all 32 threads coalesce into a single DRAM transaction.
+### Requirements
+- Computer with an NVIDIA GPU and CUDA Toolkit
+- CMake (3.18 or newer)
+- C++ compiler
 
-### 2. Shared Memory Caching & Traffic Reduction
-Instead of each thread reading $K$ values directly from off-chip DRAM (latency: ~400–800 cycles), thread blocks cooperatively stage a $32 \times 32$ block of floats into on-chip Shared Memory (~20–30 cycle latency). This eliminates redundant memory bus traffic by a factor equal to the tile dimension ($32\times$).
-
-### 3. Register Tiling & Arithmetic Intensity
-In the thread-coarsened kernel (`matmul_vec_tiled_kernel`), each thread computes $TM = 4$ rows of output simultaneously. Intermediate accumulations are stored in private GPU registers (0-cycle latency), reusing elements of matrix $B$ across multiple rows of matrix $A$ and significantly boosting the operational intensity ($\text{FLOPs} / \text{Byte}$).
-
-### 4. Zero-Copy cuBLAS Transpose Identity
-cuBLAS assumes **column-major** matrix layout (Fortran convention), while C/C++ uses **row-major**. Instead of wasting memory bandwidth transposing matrices, we leverage the linear algebraic identity:
-$$(A \cdot B)^T = B^T \cdot A^T$$
-Since a row-major matrix is identical in memory layout to its column-major transpose, passing $B$ first into `cublasSgemm` computes the correct row-major output without memory overhead:
-```cpp
-cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, d_B, N, d_A, K, &beta, d_C, N);
-```
-
----
-
-## 📂 Project Structure
-
-```text
-cuda-matrix-multiply/
-├── CMakeLists.txt              # CMake build configuration with CUDA & cuBLAS linkage
-├── README.md                   # Project documentation
-├── include/
-│   └── matrix.hpp              # Function declarations & kernel interfaces
-├── src/
-│   ├── main.cpp                # Benchmark runner & timing driver
-│   ├── matrix.cpp              # Single-threaded CPU GEMM implementation
-│   └── matrix_mul.cu           # CUDA kernels (Naive, Tiled, Thread-Coarsened, cuBLAS)
-├── tests/
-│   └── test_matrix_mul.cpp     # Unit tests with epsilon-bounded correctness checks
-└── scripts/
-    ├── run.sh                  # One-click build and execution script
-    └── nsys_easy.sh            # NVIDIA Nsight Systems profiling wrapper
-```
-
----
-
-## 🛠️ Build & Run Instructions
-
-### Prerequisites
-- **NVIDIA GPU** with Compute Capability $\ge 5.0$
-- **CUDA Toolkit** $\ge 11.0$ (`nvcc`)
-- **CMake** $\ge 3.18$
-- C++17 compatible host compiler (`gcc`, `clang`, or MSVC)
-
-### Building the Project
-
+### 1. Build
 ```bash
-# Clone the repository
-git clone https://github.com/Arshiya2801/cuda-matrix-multiply.git
-cd cuda-matrix-multiply
-
-# Configure and build
 mkdir build && cd build
 cmake ..
-cmake --build . --config Release
+cmake --build .
 ```
 
-### Running the Benchmark
-
+### 2. Run Benchmark
 ```bash
-# Run benchmark (1024x1024 matrices)
 ./matrix_mul
 ```
 
-### Running Correctness Tests
-
-Verifies all GPU implementations against the CPU golden reference ($64 \times 128 \times 96$ matrix, tolerance $\epsilon = 10^{-2}$):
-
+### 3. Run Tests
+Verify that all GPU kernels calculate the correct results:
 ```bash
 ./matrix_mul --test
-# or via CTest
-ctest --output-on-failure
 ```
 
 ---
 
-## 🔬 Profiling with NVIDIA Nsight Systems
+## Profile with NVIDIA Nsight Systems
 
-To analyze kernel execution timelines, SM utilization, and PCIe transfer overhead:
-
+To view a timeline of kernel execution and memory transfers:
 ```bash
-# Run the included profiling helper
-chmod +x scripts/nsys_easy.sh
 ./scripts/nsys_easy.sh ./build/matrix_mul
-
-# Or profile directly using nsys
-nsys profile --trace=cuda,osrt --sample=none --cpuctxsw=none -o build/profile_report ./build/matrix_mul
-nsys stats -r cuda_gpu_sum build/profile_report.nsys-rep
 ```
 
 ---
 
-## ☁️ Running on Google Colab (Free NVIDIA GPU)
+## Running on Google Colab (Free GPU)
 
-If your local environment lacks a physical NVIDIA GPU:
+If your laptop does not have an NVIDIA GPU, you can run this for free in Google Colab:
 
-1. Open [Google Colab](https://colab.research.google.com/) and navigate to **Runtime $\to$ Change runtime type $\to$ T4 GPU**.
-2. Clone and run in a notebook cell:
+1. Open [Google Colab](https://colab.research.google.com/) and set runtime to **T4 GPU** (*Runtime $\to$ Change runtime type $\to$ T4 GPU*).
+2. Run this in a code cell:
 ```bash
 !git clone https://github.com/Arshiya2801/cuda-matrix-multiply.git
 %cd cuda-matrix-multiply
@@ -159,5 +80,11 @@ If your local environment lacks a physical NVIDIA GPU:
 
 ---
 
-## 📜 License
-This project is open-source under the [MIT License](LICENSE).
+## Project Structure
+
+- `src/matrix_mul.cu` - All CUDA kernels (Naive, Tiled, Coarsened, cuBLAS)
+- `src/matrix.cpp` - CPU reference implementation
+- `src/main.cpp` - Timing and benchmark runner
+- `tests/test_matrix_mul.cpp` - Correctness testing
+- `include/matrix.hpp` - Function declarations
+- `scripts/` - Easy run and profiling scripts
